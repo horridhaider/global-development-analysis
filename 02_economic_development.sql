@@ -254,21 +254,49 @@ SELECT
 FROM
 	weighted_difference;
 
--- E. Economic ranking [to be fixed & improved]
+
+-- E. Economic ranking [2023]
+WITH base_metrics_pivot AS (
+	SELECT
+		dc.country_name,
+		MAX(CASE WHEN fe.year = 2015 THEN fe.gdp END) AS gdp_2015,
+		MAX(CASE WHEN fe.year = 2023 THEN fe.gdp END) AS gdp_2023,
+		MAX(CASE WHEN fe.year = 2015 THEN fe.gdp_pc END) AS gdp_pc_2015,
+		MAX(CASE WHEN fe.year = 2023 THEN fe.gdp_pc END) AS gdp_pc_2023,
+		MAX(CASE WHEN fe.year = 2015 THEN fe.unemployment_rate END) AS ue_2015,
+		MAX(CASE WHEN fe.year = 2023 THEN fe.unemployment_rate END) AS ue_2023
+	FROM fact_economic fe
+	JOIN dim_country dc ON fe.country_id = dc.country_id
+	WHERE fe.year IN (2015, 2023)
+	GROUP BY dc.country_name
+),
+calculated_percentages AS (
+	SELECT
+		country_name,
+		ROUND(((gdp_2023 - gdp_2015) / NULLIF(gdp_2015, 0)) * 100, 3) AS gdp_change_perc,
+		ROUND(((gdp_pc_2023 - gdp_pc_2015) / NULLIF(gdp_pc_2015, 0)) * 100, 3) AS gdp_pc_change_perc,
+		ROUND(((ue_2023 - ue_2015) / NULLIF(ue_2015, 0)) * 100, 3) AS ue_rate_change_perc
+	FROM base_metrics_pivot
+	WHERE gdp_2015 IS NOT NULL AND gdp_2023 IS NOT NULL
+	  AND gdp_pc_2015 IS NOT NULL AND gdp_pc_2023 IS NOT NULL
+	  AND ue_2015 IS NOT NULL AND ue_2023 IS NOT NULL
+),
+individual_ranks AS (
+	SELECT
+		*,
+		-- Higher growth = Lower Rank number (1st, 2nd, etc.)
+		RANK() OVER (ORDER BY gdp_change_perc DESC) AS gdp_rank,
+		RANK() OVER (ORDER BY gdp_pc_change_perc DESC) AS gdp_pc_rank,
+		-- Lower unemployment change (steepest drops) = Lower Rank number
+		RANK() OVER (ORDER BY ue_rate_change_perc ASC) AS ue_rank
+	FROM calculated_percentages
+)
 SELECT
-	dc.country_name,
-	fe.gdp_pc,
-	fh.life_expectancy,
-	fs.literacy_rate,
-
-
-	NTILE(4) OVER(
-		PARTITION BY dc.country_name ORDER BY fe.gdp_pc DESC
-	) AS gdp_quartile
-	
-FROM dim_country dc
-JOIN fact_economic fe ON dc.country_id = fe.country_id
-JOIN fact_health fh ON fe.country_id = fh.country_id
-JOIN fact_social fs ON fh.country_id = fs.country_id
-WHERE fe.year = 2022 AND fh.year = 2022 AND fs.year = 2022;
-	
+	country_name,
+	gdp_change_perc,
+	gdp_pc_change_perc,
+	ue_rate_change_perc,
+	-- Generate a finalized master rank based on the lowest combined sum of ranks
+	RANK() OVER (ORDER BY (gdp_rank + gdp_pc_rank + ue_rank) ASC) AS master_economic_rank
+FROM individual_ranks
+ORDER BY master_economic_rank ASC;
